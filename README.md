@@ -1,0 +1,2 @@
+# Allsc
+RANDOM PYTHON SCRIPT. 
