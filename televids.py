@@ -1,69 +1,50 @@
 import os
 import subprocess
-from telegram import ChatAction
-from telegram.ext import Updater, MessageHandler, Filters
-import yt_dlp
+from telegram import Update, ChatAction
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# Token bot Telegram kamu
-TELEGRAM_BOT_TOKEN = '7956681803:AAFwnc47NYn7-83jQUFr42GJajZp_JYFoKM'
+BOT_TOKEN = "7956681803:AAFwnc47NYn7-83jQUFr42GJajZp_JYFoKM"
 
-def download_videos(url):
-    output_files = []
-    ydl_opts = {
-        'format': 'best',
-        'outtmpl': 'video_%(autonumber)03d.%(ext)s',
-        'noplaylist': False,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-        if 'entries' in info:
-            for idx, entry in enumerate(info['entries']):
-                ext = entry.get('ext', 'mp4')
-                filename = f"video_{idx+1:03d}.{ext}"
-                output_files.append(filename)
-        else:
-            ext = info.get('ext', 'mp4')
-            filename = f"video_001.{ext}"
-            output_files.append(filename)
-
-    return output_files
-
-def handle_message(update, context):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     chat_id = update.message.chat_id
 
-    update.message.reply_text("Tunggu bentar bro, lagi ambil videonya...")
+    await update.message.reply_text("Ambil video dulu bro, tunggu sebentar...")
 
-    try:
-        videos = download_videos(url)
+    # Simpan daftar file sebelum download
+    files_before = set(os.listdir())
 
-        for vid in videos:
-            if os.path.exists(vid):
-                # Resize video agar sesuai rasio standar (1280x720)
-                resized_file = f"resized_{vid}"
-                subprocess.run(["ffmpeg", "-i", vid, "-vf", "scale=1280:720", "-c:a", "copy", resized_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Jalankan yt-dlp untuk ambil video
+    subprocess.run(
+        ["yt-dlp", "-f", "bestvideo+bestaudio/best", "-o", "%(title)s.%(ext)s", url],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
-                context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
-                with open(resized_file, 'rb') as vfile:
-                    context.bot.send_video(chat_id=chat_id, video=vfile)
+    # Daftar file setelah download
+    files_after = set(os.listdir())
+    new_files = sorted(list(files_after - files_before), key=os.path.getctime)
 
-                os.remove(vid)
-                os.remove(resized_file)
+    # Filter hanya file video
+    video_files = [f for f in new_files if f.lower().endswith((".mp4", ".mkv", ".mov"))]
 
-        if not videos:
-            update.message.reply_text("Gagal ambil video bro.")
-    except Exception as e:
-        update.message.reply_text(f"Error saat download: {e}")
+    if len(video_files) < 2:
+        await update.message.reply_text("Gagal ambil video utamanya bro. Coba cek link-nya.")
+        return
 
-def main():
-    print("Bot sudah jalan bro, kirim link ke Telegram ya...")
-    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    updater.start_polling()
-    updater.idle()
+    # Ambil video ke-2 (yang utama)
+    vid = video_files[1]  # urutan kedua (index 1)
 
-if __name__ == '__main__':
-    main()
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+    with open(vid, 'rb') as f:
+        await context.bot.send_video(chat_id=chat_id, video=f)
+
+    # Hapus semua video yang diunduh (bersih-bersih)
+    for v in video_files:
+        os.remove(v)
+
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("Bot aktif bro! Kirim link dan video ke-2 bakal langsung dikirim.")
+    app.run_polling()
