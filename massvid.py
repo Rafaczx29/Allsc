@@ -1,91 +1,126 @@
 import os
-import re
-import aiohttp
 import subprocess
+import requests
 from bs4 import BeautifulSoup
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, CommandHandler, ContextTypes
 
+# Ganti dengan token bot kamu
 BOT_TOKEN = "7956681803:AAFwnc47NYn7-83jQUFr42GJajZp_JYFoKM"
+# Ganti dengan data login
+USER_EMAIL = None
+USER_PASSWORD = None
 
-user_video_links = {}
+# Fungsi login untuk mengambil cookies
+def login_to_blacktowhite(email, password):
+    login_url = 'https://www.blacktowhite.net/login/login'
+    session = requests.Session()
+    login_data = {
+        'email': email,
+        'password': password,
+        'remember_me': 'on'
+    }
+    response = session.post(login_url, data=login_data)
+    if response.url == "https://www.blacktowhite.net/":
+        return session
+    return None
 
-async def scrape_video_links(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            html = await response.text()
-            soup = BeautifulSoup(html, "html.parser")
-            links = []
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if "/media/" in href and ("videos/" in href or href.endswith(".mp4")):
-                    if not href.startswith("http"):
-                        href = "https://blacktowhite.net" + href
-                    links.append(href)
-            return list(set(links))
+# Fungsi untuk scraping video dari halaman media
+def scrape_videos(page_url, session):
+    response = session.get(page_url)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # Mengambil link video dari halaman
+    video_links = []
+    for video in soup.find_all('a', class_='video-thumbnail'):
+        video_url = video.get('href')
+        if video_url:
+            video_links.append('https://www.blacktowhite.net' + video_url)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return video_links
+
+# Handler untuk login
+async def start_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Masukkan email dan password untuk login (format: email|password).")
+
+# Handler untuk menerima email dan password
+async def handle_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global USER_EMAIL, USER_PASSWORD
+    user_input = update.message.text.strip()
+    
+    if "|" not in user_input:
+        await update.message.reply_text("Format salah. Harap masukkan email dan password dengan format email|password.")
+        return
+    
+    USER_EMAIL, USER_PASSWORD = user_input.split('|')
+    session = login_to_blacktowhite(USER_EMAIL, USER_PASSWORD)
+    
+    if session:
+        await update.message.reply_text("Login sukses! Kirim link halaman media yang ingin di-scrape.")
+        context.user_data['session'] = session  # Simpan session untuk keperluan selanjutnya
+    else:
+        await update.message.reply_text("Login gagal. Cek email dan password kamu.")
+
+# Handler untuk menerima link dan mengscrape video
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'session' not in context.user_data:
+        await update.message.reply_text("Kamu perlu login terlebih dahulu. Ketik /login untuk memulai.")
+        return
+    
+    session = context.user_data['session']
     url = update.message.text.strip()
+    
+    await update.message.reply_text("Sedang mengscrape halaman... Tunggu sebentar.")
+    
+    video_links = scrape_videos(url, session)
+    
+    if not video_links:
+        await update.message.reply_text("Tidak ada video ditemukan di halaman ini.")
+        return
+    
+    # Mengirim jumlah video dan tombol untuk melanjutkan
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Lanjut", callback_data="download_videos")]])
+    await update.message.reply_text(f"Total video ditemukan: {len(video_links)}", reply_markup=reply_markup)
+    
+    context.user_data['video_links'] = video_links  # Simpan video links
+
+# Handler untuk mendownload video
+async def download_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'video_links' not in context.user_data:
+        await update.message.reply_text("Tidak ada video yang tersedia untuk di-download.")
+        return
+    
+    video_links = context.user_data['video_links']
     chat_id = update.message.chat_id
+    
+    # Kirim video satu per satu
+    for video_link in video_links:
+        # Ambil nama video dengan cara sederhana
+        video_name = video_link.split('/')[-1] + '.mp4'
+        
+        await update.message.reply_text(f"Sedang mengirim video: {video_name}")
+        
+        # Download video menggunakan yt-dlp
+        subprocess.run(['yt-dlp', '-o', video_name, video_link])
+        
+        with open(video_name, 'rb') as vid:
+            await context.bot.send_video(chat_id=chat_id, video=vid)
+        
+        # Hapus file setelah mengirim
+        os.remove(video_name)
 
-    if not url.startswith("http"):
-        await update.message.reply_text("Kirim link halaman yang valid, bro.")
-        return
+# Setup bot
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    await update.message.reply_text("Sedang cari video di halaman itu bro...")
-
-    links = await scrape_video_links(url)
-
-    if not links:
-        await update.message.reply_text("Gak ketemu video bro di halaman itu.")
-        return
-
-    user_video_links[chat_id] = links
-
-    await update.message.reply_text(
-        f"Ditemukan {len(links)} video.\nKirim semua sekarang?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Lanjut Kirim", callback_data="send_videos")]
-        ])
-    )
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-
-    if query.data == "send_videos":
-        links = user_video_links.get(chat_id, [])
-        if not links:
-            await query.edit_message_text("Gagal ambil link video bro.")
-            return
-
-        await query.edit_message_text("Mulai kirim video...")
-
-        files_before = set(os.listdir())
-        for i, link in enumerate(links):
-            await context.bot.send_message(chat_id, f"Download video {i+1}...\n{link}")
-            subprocess.run(["yt-dlp", "-f", "best", "-o", "%(title)s.%(ext)s", link],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        files_after = set(os.listdir())
-        new_files = sorted(list(files_after - files_before), key=os.path.getctime)
-        video_files = [f for f in new_files if f.lower().endswith((".mp4", ".mkv", ".mov"))]
-
-        for vid_file in video_files:
-            try:
-                with open(vid_file, 'rb') as vid:
-                    await context.bot.send_video(chat_id=chat_id, video=vid)
-            except Exception as e:
-                await context.bot.send_message(chat_id, f"Gagal kirim {vid_file}: {e}")
-            os.remove(vid_file)
-
-        await context.bot.send_message(chat_id, "Selesai kirim semua videonya bro.")
+    # Tambahkan handler
+    app.add_handler(CommandHandler("login", start_login))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_login))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(InlineQueryHandler(download_videos, pattern="download_videos"))
+    
+    print("Bot aktif, kirim perintah 'LOGIN' untuk memulai.")
+    app.run_polling()
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    print("Bot aktif bro! Kirim link page blacktowhite, nanti bot scrape & siapin kirim video.")
-    app.run_polling()
+    main()
