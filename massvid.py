@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-BOT_TOKEN = "TOKEN_BOT_LOE_DISINI"
+BOT_TOKEN = "7956681803:AAFwnc47NYn7-83jQUFr42GJajZp_JYFoKM"
 
 user_video_links = {}
 
