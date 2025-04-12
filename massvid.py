@@ -1,129 +1,131 @@
-import os
-import re
 import httpx
-import asyncio
 from bs4 import BeautifulSoup
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes
-)
-from telegram.constants import ChatAction
+from telegram import (Update, InlineKeyboardMarkup, InlineKeyboardButton, ChatAction)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
-BOT_TOKEN = "7956681803:AAFwnc47NYn7-83jQUFr42GJajZp_JYFoKM"
-user_session = httpx.Client(follow_redirects=True)
+# TOKEN BOT TELEGRAM
+BOT_TOKEN = "7956681803:AAFwnc47NYn7-83jQUFr42GJajZp_JYFoKM"  # Ganti dengan token bot Telegram kamu
+
+# Global session untuk login
+user_session = httpx.Client(headers={
+    "User-Agent": "Mozilla/5.0 (Linux; Android 12; M2007J20CG Build/SKQ1.211019.001) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/135.0.7049.38 Mobile Safari/537.36"
+}, follow_redirects=False)
+
 cookies = None
-user_id_logged_in = None
-stored_url = None
 
-# ---- LOGIN COMMAND ----
+# ----------- HANDLE /login ------------
 async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Kirim email dan password Blacktowhite kamu dalam format:\n\n`email@domain.com|password`", parse_mode="Markdown")
+    await update.message.reply_text("Kirim email dan password blacktowhite kamu dalam format:\n\n email|password")
 
-# ---- HANDLE CREDENTIAL ----
+# ----------- HANDLE CREDENTIAL ------------
 async def handle_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global cookies, user_id_logged_in
+    global cookies
     if "|" not in update.message.text:
-        return
+        return await update.message.reply_text("Format salah. Gunakan email|password")
+
     email, password = update.message.text.strip().split("|")
-    login_url = "https://www.blacktowhite.net/login/login"
 
     try:
-        res = user_session.post(login_url, data={"login": email, "password": password})
-        if "Log Out" in res.text or "Your Account" in res.text:
+        # Step 1: GET login page
+        resp = user_session.get("https://www.blacktowhite.net/login/login")
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Ambil CSRF token
+        token = soup.find("input", {"name": "_xfToken"}).get("value")
+        
+        # Set cookie age_verified
+        user_session.cookies.set("age_verified", "1")
+
+        # Step 2: Kirim form login
+        payload = {
+            "_xfToken": token,
+            "login": email,
+            "password": password,
+            "remember": "1",
+            "_xfRedirect": "https://www.blacktowhite.net/"
+        }
+
+        headers = {
+            "Referer": "https://www.blacktowhite.net/login/login",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": user_session.headers["User-Agent"]
+        }
+
+        login_post = user_session.post("https://www.blacktowhite.net/login/login", data=payload, headers=headers)
+
+        # Step 3: Cek apakah login berhasil
+        if login_post.status_code == 303 and 'xf_user' in user_session.cookies:
             cookies = user_session.cookies
-            user_id_logged_in = update.message.from_user.id
-            await update.message.reply_text("Login sukses bro! Sekarang kirim link halaman video.")
+            await update.message.reply_text("Login sukses! Kirim link halaman medianya.")
         else:
-            await update.message.reply_text("Login gagal. Cek kembali email/password.")
+            await update.message.reply_text("Login gagal. Coba cek email/password.")
     except Exception as e:
         await update.message.reply_text(f"Gagal login: {e}")
 
-# ---- HANDLE LINK PAGE ----
-async def handle_page_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global stored_url
+# ----------- HANDLE LINK PAGE MEDIANYA ------------
+async def handle_media_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if cookies is None:
+        return await update.message.reply_text("Kamu belum login! Ketik /login untuk login dulu.")
 
-    if update.message.from_user.id != user_id_logged_in:
-        await update.message.reply_text("Login dulu bro pakai /login.")
-        return
+    # Ambil link page media dari user
+    media_page_url = update.message.text.strip()
 
-    url = update.message.text.strip()
-    if not url.startswith("https://blacktowhite.net/media/videos/"):
-        await update.message.reply_text("Link tidak valid. Harus dari halaman video Blacktowhite.")
-        return
-
-    stored_url = url
+    # Step 1: Scrape page media
     try:
-        res = user_session.get(url)
-        soup = BeautifulSoup(res.text, "html.parser")
-        video_links = soup.find_all("a", href=re.compile(r"^/media/[^/]+/"))
+        response = user_session.get(media_page_url, cookies=cookies)
+        if response.status_code != 200:
+            return await update.message.reply_text("Gagal mengambil halaman. Cek URL dan coba lagi.")
 
-        await update.message.reply_text(
-            f"Ditemukan {len(video_links)} video di halaman ini.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Lanjut Download", callback_data="download_videos")]
-            ])
-        )
+        # Parse halaman dengan BeautifulSoup
+        soup = BeautifulSoup(response.text, "html.parser")
+        video_links = [video.get("href") for video in soup.find_all("a", href=True) if "video" in video["href"]]
+
+        if not video_links:
+            return await update.message.reply_text("Tidak ada video yang ditemukan di halaman ini.")
+
+        # Kirim jumlah video yang ditemukan
+        await update.message.reply_text(f"Jumlah video yang ditemukan: {len(video_links)}\nKlik 'Lanjut' untuk mulai mengunduh.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Lanjut", callback_data="download_videos")]
+        ]))
+
+        # Simpan video links di context
+        context.user_data["video_links"] = video_links
+
     except Exception as e:
-        await update.message.reply_text(f"Gagal scrape halaman: {e}")
+        await update.message.reply_text(f"Terjadi kesalahan: {e}")
 
-# ---- HANDLE BUTTON "Lanjut" ----
+# ----------- HANDLE DOWNLOAD VIDEO ------------
 async def download_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global stored_url
-    query = update.callback_query
-    await query.answer()
+    video_links = context.user_data.get("video_links", [])
+    if not video_links:
+        return await update.message.reply_text("Tidak ada video untuk diunduh. Kirim link page media terlebih dahulu.")
 
-    await context.bot.send_message(chat_id=query.from_user.id, text="Proses ambil video dimulai bro...")
+    # Mulai download video
+    try:
+        for video_url in video_links:
+            await update.message.reply_text(f"Men-download video: {video_url}")
+            video_data = user_session.get(video_url)
+            
+            # Kirim video ke user
+            await update.message.reply_video(video_data.content)
+        
+        await update.message.reply_text("Semua video telah diunduh.")
 
-    res = user_session.get(stored_url)
-    soup = BeautifulSoup(res.text, "html.parser")
-    video_links = soup.find_all("a", href=re.compile(r"^/media/[^/]+/"))
+    except Exception as e:
+        await update.message.reply_text(f"Terjadi kesalahan saat mengunduh video: {e}")
 
-    media_urls = ["https://blacktowhite.net" + a['href'] for a in video_links]
-
-    for idx, media_url in enumerate(media_urls):
-        await context.bot.send_message(chat_id=query.from_user.id, text=f"Download video {idx + 1}/{len(media_urls)}")
-
-        # Simpan file sebelum download
-        before = set(os.listdir())
-
-        try:
-            os.system(f'yt-dlp -f best -o "%(title)s.%(ext)s" "{media_url}" > /dev/null 2>&1')
-        except:
-            continue
-
-        after = set(os.listdir())
-        new_files = list(after - before)
-        video_files = [f for f in new_files if f.lower().endswith((".mp4", ".mkv", ".mov"))]
-
-        for vid in sorted(video_files, key=os.path.getctime):
-            await context.bot.send_chat_action(chat_id=query.from_user.id, action=ChatAction.UPLOAD_VIDEO)
-            try:
-                with open(vid, 'rb') as v:
-                    await context.bot.send_video(chat_id=query.from_user.id, video=v)
-            except Exception as e:
-                await context.bot.send_message(chat_id=query.from_user.id, text=f"Gagal kirim: {e}")
-            os.remove(vid)
-
-    await context.bot.send_message(chat_id=query.from_user.id, text="Selesai semua bro!")
-
-# ---- MAIN ----
+# ----------- MAIN FUNCTION ------------
 def main():
+    # Buat aplikasi Telegram bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Daftarkan handler
     app.add_handler(CommandHandler("login", login_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_credentials))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_page_link))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_credentials))  # Handle email|password
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_media_link))  # Handle link page
     app.add_handler(CallbackQueryHandler(download_videos, pattern="download_videos"))
 
-    print("Bot jalan bro... tinggal kirim /login dulu.")
+    # Jalankan bot
     app.run_polling()
 
 if __name__ == "__main__":
